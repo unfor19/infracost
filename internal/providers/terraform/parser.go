@@ -12,12 +12,14 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func createResource(resourceData *schema.ResourceData) *schema.Resource {
+var infracostProviderName = "infracost.io/infracost/infracost"
+
+func createResource(resourceData *schema.ResourceData, usageResourceData *schema.ResourceData) *schema.Resource {
 	switch resourceData.Type {
 	case "aws_instance":
 		return aws.AwsInstance(resourceData)
 	case "aws_nat_gateway":
-		return aws.AwsNatGateway(resourceData)
+		return aws.AwsNatGateway(resourceData, usageResourceData)
 	}
 	return nil
 }
@@ -32,9 +34,12 @@ func parsePlanJSON(j []byte) []*schema.Resource {
 
 	resourceDataMap := parseResourceData(planJSON, providerConfig, plannedValuesJSON)
 	parseReferences(resourceDataMap, configurationJSON)
+	usageResourceDataMap := buildUsageResourceDataMap(resourceDataMap)
+	resourceDataMap = stripInfracostResources(resourceDataMap)
 
 	for _, resourceData := range resourceDataMap {
-		resource := createResource(resourceData)
+		usageResourceData := usageResourceDataMap[resourceData.Address]
+		resource := createResource(resourceData, usageResourceData)
 		if resource != nil {
 			resources = append(resources, resource)
 		}
@@ -49,8 +54,9 @@ func parseResourceData(planJSON gjson.Result, providerConfig gjson.Result, plann
 	resourceDataMap := make(map[string]*schema.ResourceData)
 
 	for _, terraformResource := range plannedValuesJSON.Get("resources").Array() {
-		address := terraformResource.Get("address").String()
 		resourceType := terraformResource.Get("type").String()
+		providerName := terraformResource.Get("provider_name").String()
+		address := terraformResource.Get("address").String()
 		rawValues := terraformResource.Get("values")
 
 		// Override the region with the region from the arn if it
@@ -60,7 +66,7 @@ func parseResourceData(planJSON gjson.Result, providerConfig gjson.Result, plann
 		}
 		rawValues = addRawValue(rawValues, "region", awsRegion)
 
-		resourceDataMap[address] = schema.NewResourceData(resourceType, address, rawValues)
+		resourceDataMap[address] = schema.NewResourceData(resourceType, providerName, address, rawValues)
 	}
 
 	// Recursively add any resources for child modules
@@ -93,6 +99,28 @@ func addRawValue(rawValues gjson.Result, key string, value interface{}) gjson.Re
 	return gjson.ParseBytes(marshalledJSON)
 }
 
+func buildUsageResourceDataMap(resourceDataMap map[string]*schema.ResourceData) map[string]*schema.ResourceData {
+	usageResourceDataMap := make(map[string]*schema.ResourceData)
+	for _, resourceData := range resourceDataMap {
+		if resourceData.ProviderName == infracostProviderName {
+			for _, refResourceData := range resourceData.References("resources") {
+				usageResourceDataMap[refResourceData.Address] = resourceData
+			}
+		}
+	}
+	return usageResourceDataMap
+}
+
+func stripInfracostResources(resourceDataMap map[string]*schema.ResourceData) map[string]*schema.ResourceData {
+	newResourceDataMap := make(map[string]*schema.ResourceData)
+	for address, resourceData := range resourceDataMap {
+		if resourceData.ProviderName != infracostProviderName {
+			newResourceDataMap[address] = resourceData
+		}
+	}
+	return newResourceDataMap
+}
+
 func parseReferences(resourceDataMap map[string]*schema.ResourceData, configurationJSON gjson.Result) {
 	for address, resourceData := range resourceDataMap {
 		resourceConfigJSON := getConfigurationJSONForResourceAddress(configurationJSON, address)
@@ -104,7 +132,7 @@ func parseReferences(resourceDataMap map[string]*schema.ResourceData, configurat
 
 		for attribute, refAddresses := range refAddressesMap {
 			for _, refAddress := range refAddresses {
-				fullRefAddress := fmt.Sprintf("%s.%s", addressModulePart(address), refAddress)
+				fullRefAddress := fmt.Sprintf("%s%s", addressModulePart(address), refAddress)
 				if refResourceData, ok := resourceDataMap[fullRefAddress]; ok {
 					resourceData.AddReference(attribute, refResourceData)
 				}
@@ -146,9 +174,13 @@ func getConfigurationJSONForModulePath(configurationJSON gjson.Result, moduleNam
 	for _, moduleName := range moduleNames {
 		moduleKeyParts = append(moduleKeyParts, fmt.Sprintf("module_calls.%s.module", moduleName))
 	}
-	moduleKey := strings.Join(moduleKeyParts, ".")
 
-	return configurationJSON.Get(moduleKey)
+	if len(moduleKeyParts) == 0 {
+		return configurationJSON
+	} else {
+		moduleKey := strings.Join(moduleKeyParts, ".")
+		return configurationJSON.Get(moduleKey)
+	}
 }
 
 func addressResourcePart(address string) string {
@@ -160,7 +192,11 @@ func addressResourcePart(address string) string {
 func addressModulePart(address string) string {
 	addressParts := strings.Split(address, ".")
 	moduleParts := addressParts[:len(addressParts)-2]
-	return strings.Join(moduleParts, ".")
+	if len(moduleParts) == 0 {
+		return ""
+	} else {
+		return fmt.Sprintf("%s.", strings.Join(moduleParts, "."))
+	}
 }
 
 func addressModuleNames(address string) []string {
