@@ -21,6 +21,8 @@ func createResource(resourceData *schema.ResourceData, usageResourceData *schema
 		return aws.AwsInstance(resourceData)
 	case "aws_nat_gateway":
 		return aws.AwsNatGateway(resourceData, usageResourceData)
+	case "aws_ecs_service":
+		return aws.AwsEcsService(resourceData)
 	}
 	return nil
 }
