@@ -10,8 +10,8 @@ var hourToMonthMultiplier = decimal.NewFromInt(730)
 
 type Resource struct {
 	Name           string
-	SubResources   []*Resource
 	CostComponents []*CostComponent
+	SubResources   []*Resource
 	hourlyCost     decimal.Decimal
 	monthlyCost    decimal.Decimal
 }
